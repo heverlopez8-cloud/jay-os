@@ -139,6 +139,17 @@ def cmd_pilot(args) -> int:
     return run_pilot(Path(args.out))
 
 
+def cmd_graphify_export(args) -> int:
+    from .graphify_export import write_export
+    store = _store(args)
+    path = write_export(store, args.out)
+    print(f"wrote {path} ({path.stat().st_size} bytes) -- graphify-shaped, "
+          f"NOT written into graphify-out/. Hand this to Jay or graphify's "
+          f"own tooling when a real merge is wanted.")
+    store.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m graph",
                                      description="JAY-OS Graph Integration Engine v1")
@@ -187,6 +198,12 @@ def main(argv: list[str] | None = None) -> int:
     pilot = subparsers.add_parser("pilot")
     pilot.add_argument("--out", default="/tmp/jayos-graph-pilot")
     pilot.set_defaults(func=cmd_pilot)
+
+    graphify_export = subparsers.add_parser("graphify-export")
+    graphify_export.add_argument(
+        "--out", default=str(Path(__file__).resolve().parent
+                             / "graphify_compatible_export.json"))
+    graphify_export.set_defaults(func=cmd_graphify_export)
 
     args = parser.parse_args(argv)
     return int(args.func(args) or 0)

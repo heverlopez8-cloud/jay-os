@@ -32,6 +32,7 @@ graph/jayos-graph.sqlite3-*
 graph/pages/
 graph/logs/
 graph/vault-sample/
+graph/graphify_compatible_export.json
 /tmp/
 
 # --- Generated permit PDFs (large binaries, one per permit, rebuilt from

@@ -887,6 +887,125 @@ class TestMatchedEmailHandler(unittest.TestCase):
         self.assertLess(edge["confidence"], gates()[0])
 
 
+class TestVaultCrosswalk(unittest.TestCase):
+    """Correspondence recorded, never a rename -- DATA_DICTIONARY.md's own rule."""
+
+    def test_crosswalk_does_not_change_the_entity_id(self):
+        store = _store()
+        eid = _entity(store, E.PROJECT, "Vallejo", external_id="notion-abc")
+        store.record_vault_correspondence(eid, "PRJ-2026-0042", source="test",
+                                          source_ref="r1", confidence=0.9)
+        self.assertEqual(store.entity(eid)["entity_id"], eid,
+                         "the entity's own id must never be rewritten")
+
+    def test_lookup_both_directions(self):
+        store = _store()
+        eid = _entity(store, E.PERSON, "Casey Rowden Nair")
+        store.record_vault_correspondence(eid, "PER-0007", source="test",
+                                          source_ref="r1", confidence=0.85)
+        self.assertEqual(store.vault_id_for(eid), "PER-0007")
+        self.assertEqual(store.entity_for_vault_id("PER-0007"), eid)
+
+    def test_malformed_vault_id_is_refused(self):
+        store = _store()
+        eid = _entity(store, E.PERSON, "X")
+        with self.assertRaises(StoreError):
+            store.record_vault_correspondence(eid, "not-a-real-id", source="t",
+                                              source_ref="r", confidence=0.9)
+
+    def test_unknown_entity_is_refused(self):
+        store = _store()
+        with self.assertRaises(StoreError):
+            store.record_vault_correspondence("PERSON-NOPE", "PER-0001",
+                                              source="t", source_ref="r",
+                                              confidence=0.9)
+
+    def test_idempotent(self):
+        store = _store()
+        eid = _entity(store, E.PERSON, "X")
+        first = store.record_vault_correspondence(eid, "PER-0001", source="t",
+                                                   source_ref="r", confidence=0.9)
+        second = store.record_vault_correspondence(eid, "PER-0001", source="t",
+                                                    source_ref="r", confidence=0.9)
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    def test_established_identifier_detection_matches_the_dictionary_rule(self):
+        from graph.crosswalk import has_established_identifier
+        self.assertTrue(has_established_identifier({"notion_page_id": "abc"}))
+        self.assertTrue(has_established_identifier({"apn": "314-14-919"}))
+        self.assertTrue(has_established_identifier({"email": "x@y.com"}))
+        self.assertFalse(has_established_identifier({}))
+
+    def test_project_type_has_a_vault_prefix_but_permit_does_not(self):
+        from graph.crosswalk import vault_prefix_for
+        self.assertEqual(vault_prefix_for(E.PROJECT), "PRJ")
+        self.assertIsNone(vault_prefix_for(E.PERMIT),
+                          "PERMIT has no DATA_DICTIONARY.md equivalent -- must "
+                          "not be guessed")
+
+
+class TestGraphifyExport(unittest.TestCase):
+    """Schema-compatible output, not a merge -- never touches graphify-out/."""
+
+    def test_export_shape_matches_graphify(self):
+        from graph.graphify_export import build_export
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=5))
+        d = build_export(store)
+        self.assertIn("directed", d)
+        self.assertIn("multigraph", d)
+        self.assertIn("nodes", d)
+        self.assertIn("edges", d)
+        self.assertIsInstance(d["graph"]["hyperedges"], list)
+
+    def test_confidence_categories_stay_in_graphify_rubric(self):
+        from graph.graphify_export import build_export
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=15))
+        d = build_export(store)
+        cats = {e["confidence"] for e in d["edges"]}
+        self.assertTrue(cats <= {"EXTRACTED", "INFERRED"})
+
+    def test_asserted_disposition_always_exports_as_extracted_1_0(self):
+        from graph.graphify_export import build_export
+        store = _store()
+        a = _entity(store, E.PERMIT, "B26-2089")
+        b = _entity(store, E.JURISDICTION, "Queen Creek")
+        store.relate(a, R.SUBMITTED_TO, b, source_reference="r", confidence=1.0,
+                     extraction_method="t", asserted=True)
+        d = build_export(store)
+        self.assertEqual(d["edges"][0]["confidence"], "EXTRACTED")
+        self.assertEqual(d["edges"][0]["confidence_score"], 1.0)
+
+    def test_write_export_produces_valid_json(self):
+        from graph.graphify_export import write_export
+        import json as jsonlib
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=5))
+        with tempfile.TemporaryDirectory() as out:
+            path = write_export(store, Path(out) / "export.json")
+            reloaded = jsonlib.loads(path.read_text())
+            self.assertEqual(len(reloaded["nodes"]), store.count("entities"))
+
+    def test_export_never_writes_outside_its_own_output_file(self):
+        """The module may EXPLAIN in its docstring why it doesn't touch
+        graphify-out or the vault; the actual code must contain no hardcoded
+        path into either. Checked on the source with the module docstring
+        stripped, so the explanation itself doesn't trip the assertion."""
+        from graph import graphify_export
+        import ast
+        import inspect
+        source = inspect.getsource(graphify_export)
+        module = ast.parse(source)
+        docstring = ast.get_docstring(module) or ""
+        code_only = source.replace(docstring, "", 1)
+        self.assertNotIn("graphify-out", code_only)
+        self.assertNotIn("JAY-OS", code_only)
+        # and confirm the one file it DOES write is parameterised, not fixed
+        self.assertIn("out_path: str | Path = DEFAULT_OUT", source)
+
+
 class TestPilot(unittest.TestCase):
     """The Phase 12 pilot is itself a regression test."""
 

@@ -178,6 +178,24 @@ CREATE TABLE IF NOT EXISTS owner_overrides (
     recorded_at     TEXT NOT NULL,
     entity_ids      TEXT NOT NULL DEFAULT '[]'
 );
+
+-- A CROSSWALK, not a rename. See crosswalk.py's module docstring: renaming an
+-- entity that already has an established identifier (a Notion page ID, an
+-- APN) is exactly what DATA_DICTIONARY.md's own rule forbids. This table
+-- records "this graph entity corresponds to that vault note" as a SEPARATE
+-- fact, so the two ID systems can be joined without either one changing.
+CREATE TABLE IF NOT EXISTS vault_crosswalk (
+    entity_id     TEXT NOT NULL,
+    vault_id      TEXT NOT NULL,
+    vault_prefix  TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    source_ref    TEXT NOT NULL,
+    confidence    REAL NOT NULL,
+    recorded_at   TEXT NOT NULL,
+    UNIQUE (entity_id, vault_id)
+);
+CREATE INDEX IF NOT EXISTS crosswalk_entity ON vault_crosswalk(entity_id);
+CREATE INDEX IF NOT EXISTS crosswalk_vault  ON vault_crosswalk(vault_id);
 """
 
 
@@ -562,6 +580,51 @@ class GraphStore:
     def overrides(self) -> list[sqlite3.Row]:
         return self._db.execute(
             "SELECT * FROM owner_overrides ORDER BY timestamp").fetchall()
+
+    # --------------------------------------------------------- vault crosswalk
+
+    def record_vault_correspondence(self, entity_id: str, vault_id: str, *,
+                                    source: str, source_ref: str,
+                                    confidence: float) -> bool:
+        """Record that a graph entity corresponds to a real vault note ID.
+
+        Never renames `entity_id`. Refuses if the entity does not exist (same
+        no-phantom-endpoints rule `relate()` enforces) or if `vault_id` does
+        not look like a DATA_DICTIONARY.md-shaped ID, since a malformed vault
+        ID here would silently poison every downstream join against it.
+        """
+        import re
+        if self.entity(entity_id) is None:
+            raise StoreError(f"unknown entity {entity_id}; cannot crosswalk it")
+        if not re.match(r"^[A-Z]{2,5}-(\d{4}-)?\d{4,}$", vault_id):
+            raise StoreError(
+                f"{vault_id!r} is not a DATA_DICTIONARY.md-shaped ID "
+                f"(expected e.g. PRJ-2026-0001 or PER-0001)")
+        prefix = vault_id.split("-", 1)[0]
+        cursor = self._db.execute(
+            "INSERT OR IGNORE INTO vault_crosswalk (entity_id, vault_id, "
+            "vault_prefix, source, source_ref, confidence, recorded_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (entity_id, vault_id, prefix, source, source_ref, float(confidence),
+             now_iso()))
+        self._db.commit()
+        return cursor.rowcount > 0
+
+    def vault_id_for(self, entity_id: str) -> str | None:
+        row = self._db.execute(
+            "SELECT vault_id FROM vault_crosswalk WHERE entity_id = ? "
+            "ORDER BY confidence DESC LIMIT 1", (entity_id,)).fetchone()
+        return row["vault_id"] if row else None
+
+    def entity_for_vault_id(self, vault_id: str) -> str | None:
+        row = self._db.execute(
+            "SELECT entity_id FROM vault_crosswalk WHERE vault_id = ? LIMIT 1",
+            (vault_id,)).fetchone()
+        return row["entity_id"] if row else None
+
+    def crosswalk_entries(self) -> list[sqlite3.Row]:
+        return self._db.execute(
+            "SELECT * FROM vault_crosswalk ORDER BY vault_prefix, vault_id").fetchall()
 
     # ------------------------------------------------------------------ counts
 
