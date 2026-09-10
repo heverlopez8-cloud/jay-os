@@ -1006,6 +1006,162 @@ class TestGraphifyExport(unittest.TestCase):
         self.assertIn("out_path: str | Path = DEFAULT_OUT", source)
 
 
+class TestSnapshotsAndBrief(unittest.TestCase):
+    """The overnight brief: a subtraction over recorded state, not a guess."""
+
+    def test_first_snapshot_says_so_rather_than_claiming_no_change(self):
+        from graph.brief import render
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=3))
+        store.take_snapshot(0.0, label="first")
+        text = render(store)
+        self.assertIn("First snapshot", text)
+        self.assertNotIn("Nothing changed overnight", text,
+                         "a first run must not claim nothing changed")
+
+    def test_no_snapshots_at_all_is_stated_plainly(self):
+        from graph.brief import render
+        self.assertIn("No snapshots recorded yet", render(_store()))
+
+    def test_delta_between_two_snapshots_lists_the_new_items(self):
+        """The production path: snapshots a night apart, window resolvable."""
+        import time
+        from graph.brief import render
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=3))
+        store.take_snapshot(0.0, label="before")
+        time.sleep(1.05)  # created_at is second-precision; clear the boundary
+        GraphPipeline(store).ingest(ProjectsJson(limit=8))
+        store.take_snapshot(0.0, label="after")
+        text = render(store)
+        self.assertIn("CHANGE SINCE", text)
+        self.assertIn("NEW ENTITIES", text)
+        self.assertNotIn("Nothing changed overnight", text)
+
+    def test_same_second_window_is_admitted_not_papered_over(self):
+        """Counts say +N but detail can't resolve -- must say so, not lie.
+
+        This is the bug this test exists for: the brief once printed
+        "Nothing changed overnight" directly beneath a row reading "+22".
+        """
+        from graph.brief import render
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=3))
+        store.take_snapshot(0.0, label="before")
+        GraphPipeline(store).ingest(ProjectsJson(limit=8))
+        store.take_snapshot(0.0, label="after")  # same second as "before"
+        text = render(store)
+        self.assertNotIn("Nothing changed overnight", text,
+                         "must never claim a quiet night while counts show change")
+        self.assertIn("could not be resolved", text)
+
+    def test_quiet_night_is_reported_as_quiet(self):
+        from graph.brief import render
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=3))
+        store.take_snapshot(0.0)
+        store.take_snapshot(0.0)
+        self.assertIn("Nothing changed overnight", render(store))
+
+    def test_brief_never_writes_to_the_store(self):
+        from graph.brief import render
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=5))
+        store.take_snapshot(0.0)
+        store.take_snapshot(0.0)
+        before = (store.count("entities"), store.count("relationships"),
+                  store.count("events"), store.count("lessons"))
+        render(store)
+        after = (store.count("entities"), store.count("relationships"),
+                 store.count("events"), store.count("lessons"))
+        self.assertEqual(before, after)
+
+    def test_brief_states_lessons_are_not_active(self):
+        from graph.brief import render
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=30))
+        store.take_snapshot(0.0)
+        lessons_module.generate(store)
+        store.take_snapshot(0.0)
+        text = render(store)
+        if store.lessons(LessonStatus.CANDIDATE):
+            self.assertIn("Promotion needs you", text)
+
+    def test_snapshot_records_the_counts_it_claims(self):
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=6))
+        store.take_snapshot(0.25, label="t")
+        row = store.latest_snapshots(1)[0]
+        self.assertEqual(row["entities"], store.count("entities"))
+        self.assertEqual(row["relationships"], store.count("relationships"))
+        self.assertEqual(row["isolated_rate"], 0.25)
+
+
+class TestSupersededExcludedFromHealth(unittest.TestCase):
+    """A correct merge must not make the headline metric look worse."""
+
+    def test_superseded_entity_is_not_counted_as_isolated(self):
+        store = _store()
+        a = _entity(store, E.PERSON, "Bob Smith")
+        b = _entity(store, E.PERSON, "Robert Smith")
+        keep = _entity(store, E.PERMIT, "B26-2089")
+        jur = _entity(store, E.JURISDICTION, "Queen Creek")
+        store.relate(keep, R.SUBMITTED_TO, jur, source_reference="r",
+                     confidence=1.0, extraction_method="t", asserted=True)
+        before = health_module.report(store)
+        store.supersede_entity(a, merged_into=b, actor="jay")
+        after = health_module.report(store)
+        self.assertEqual(after.total_entities, before.total_entities - 1)
+        self.assertLessEqual(after.isolated_node_rate, before.isolated_node_rate,
+                             "retiring an entity must not raise the isolated rate")
+
+    def test_superseded_row_still_exists_in_the_store(self):
+        store = _store()
+        a = _entity(store, E.PERSON, "A")
+        b = _entity(store, E.PERSON, "B")
+        store.supersede_entity(a, merged_into=b, actor="jay")
+        self.assertIsNotNone(store.entity(a), "the row must survive; nothing is deleted")
+
+
+class TestRefusalLearning(unittest.TestCase):
+    """The engine noticing it keeps tripping on the same thing."""
+
+    def test_refusal_samples_are_kept_in_the_ingest_event(self):
+        class Bad:
+            name = "bad"
+            def records(self):
+                yield SourceRecord(kind="telepathy", source="bad", source_ref="b1",
+                                   observed_at="2026-01-01T00:00:00+00:00", payload={})
+        store = _store()
+        report = GraphPipeline(store).ingest(Bad())
+        self.assertTrue(report.refusals)
+        event = store.events("graph_ingest")[0]
+        self.assertTrue(json.loads(event["provenance"])["refusal_samples"])
+
+    def test_repeated_refusal_becomes_a_candidate_lesson(self):
+        class Bad:
+            name = "bad"
+            def records(self):
+                yield SourceRecord(kind="telepathy", source="bad", source_ref="b1",
+                                   observed_at="2026-01-01T00:00:00+00:00", payload={})
+        store = _store()
+        for _ in range(3):
+            GraphPipeline(store).ingest(Bad())
+        findings = lessons_module.mine_repeated_refusals(store)
+        self.assertTrue(findings, "the same refusal three nights running is a pattern")
+        self.assertLess(findings[0]["confidence"], 1.0)
+
+    def test_a_single_refusal_is_not_a_lesson(self):
+        class Bad:
+            name = "bad"
+            def records(self):
+                yield SourceRecord(kind="telepathy", source="bad", source_ref="b1",
+                                   observed_at="2026-01-01T00:00:00+00:00", payload={})
+        store = _store()
+        GraphPipeline(store).ingest(Bad())
+        self.assertEqual(lessons_module.mine_repeated_refusals(store), [])
+
+
 class TestPilot(unittest.TestCase):
     """The Phase 12 pilot is itself a regression test."""
 

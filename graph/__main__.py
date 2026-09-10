@@ -139,6 +139,26 @@ def cmd_pilot(args) -> int:
     return run_pilot(Path(args.out))
 
 
+def cmd_brief(args) -> int:
+    from .brief import render
+    store = _store(args)
+    print(render(store))
+    store.close()
+    return 0
+
+
+def cmd_snapshot(args) -> int:
+    from . import health as health_module
+    store = _store(args)
+    report = health_module.report(store)
+    snapshot_id = store.take_snapshot(report.isolated_node_rate, label=args.label)
+    print(f"snapshot {snapshot_id}: {report.total_entities} entities, "
+          f"{report.total_relationships} relationships, "
+          f"isolated {report.isolated_node_rate:.1%}")
+    store.close()
+    return 0
+
+
 def cmd_graphify_export(args) -> int:
     from .graphify_export import write_export
     store = _store(args)
@@ -198,6 +218,12 @@ def main(argv: list[str] | None = None) -> int:
     pilot = subparsers.add_parser("pilot")
     pilot.add_argument("--out", default="/tmp/jayos-graph-pilot")
     pilot.set_defaults(func=cmd_pilot)
+
+    subparsers.add_parser("brief").set_defaults(func=cmd_brief)
+
+    snapshot = subparsers.add_parser("snapshot")
+    snapshot.add_argument("--label", default="")
+    snapshot.set_defaults(func=cmd_snapshot)
 
     graphify_export = subparsers.add_parser("graphify-export")
     graphify_export.add_argument(

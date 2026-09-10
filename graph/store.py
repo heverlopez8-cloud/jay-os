@@ -196,6 +196,21 @@ CREATE TABLE IF NOT EXISTS vault_crosswalk (
 );
 CREATE INDEX IF NOT EXISTS crosswalk_entity ON vault_crosswalk(entity_id);
 CREATE INDEX IF NOT EXISTS crosswalk_vault  ON vault_crosswalk(vault_id);
+
+-- One row per nightly run. The morning brief diffs the two most recent rows,
+-- so "what changed overnight" is a subtraction, not a guess. Append-only.
+CREATE TABLE IF NOT EXISTS snapshots (
+    snapshot_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at           TEXT NOT NULL,
+    entities           INTEGER NOT NULL,
+    relationships      INTEGER NOT NULL,
+    candidate_merges   INTEGER NOT NULL,
+    candidate_lessons  INTEGER NOT NULL,
+    events             INTEGER NOT NULL,
+    overrides          INTEGER NOT NULL,
+    isolated_rate      REAL NOT NULL,
+    label              TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -626,12 +641,33 @@ class GraphStore:
         return self._db.execute(
             "SELECT * FROM vault_crosswalk ORDER BY vault_prefix, vault_id").fetchall()
 
+    # --------------------------------------------------------------- snapshots
+
+    def take_snapshot(self, isolated_rate: float, label: str = "") -> int:
+        """Freeze tonight's counts so tomorrow's brief can subtract them."""
+        from .contract import LessonStatus
+        cursor = self._db.execute(
+            "INSERT INTO snapshots (taken_at, entities, relationships, "
+            "candidate_merges, candidate_lessons, events, overrides, "
+            "isolated_rate, label) VALUES (?,?,?,?,?,?,?,?,?)",
+            (now_iso(), self.count("entities"), self.count("relationships"),
+             len(self.candidate_merges()), len(self.lessons(LessonStatus.CANDIDATE)),
+             self.count("events"), self.count("owner_overrides"),
+             float(isolated_rate), label))
+        self._db.commit()
+        return int(cursor.lastrowid)
+
+    def latest_snapshots(self, n: int = 2) -> list[sqlite3.Row]:
+        return self._db.execute(
+            "SELECT * FROM snapshots ORDER BY snapshot_id DESC LIMIT ?", (n,)).fetchall()
+
     # ------------------------------------------------------------------ counts
 
     def count(self, table: str) -> int:
         allowed = {"entities", "relationships", "events", "lessons",
                    "candidate_merges", "owner_overrides", "entity_aliases",
-                   "relationship_retractions", "entity_source_refs"}
+                   "relationship_retractions", "entity_source_refs",
+                   "vault_crosswalk", "snapshots"}
         if table not in allowed:
             raise StoreError(f"{table} is not a countable table")
         return int(self._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])

@@ -59,5 +59,21 @@ run_step "ingest sentinel contacts + matched emails" ingest --contacts --matched
 run_step "lesson generation"                      lessons
 run_step "health report"                          health
 
+# Snapshot BEFORE the brief: the brief diffs the two most recent snapshots, so
+# tonight's row has to exist before it can be compared against last night's.
+run_step "snapshot"                               snapshot --label nightly
+
+# The morning brief, written to its own file so it can be read on its own
+# rather than hunted for inside the run log.
+BRIEF_FILE="$LOG_DIR/morning-brief.txt"
+if brief_output=$(python3 -m graph brief 2>&1); then
+    printf '%s\n' "$brief_output" > "$BRIEF_FILE"
+    log "PASS  morning brief -> $BRIEF_FILE"
+    printf '%s\n' "$brief_output" | sed 's/^/    /' >> "$LOG_FILE"
+else
+    log "FAIL  morning brief"
+    printf '%s\n' "$brief_output" | sed 's/^/    /' >> "$LOG_FILE"
+fi
+
 log "=== nightly re-ingest finished ==="
 exit 0

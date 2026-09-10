@@ -22,7 +22,7 @@ from collections import Counter
 from pathlib import Path
 
 from ._reuse import gates
-from .contract import Disposition, LessonStatus
+from .contract import Disposition, EntityStatus, LessonStatus
 from .store import GraphStore
 
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---\n", re.S)
@@ -58,7 +58,13 @@ def report(store: GraphStore, vault_root: str | Path | None = None) -> HealthRep
     _auto, propose, _min = gates()
     health = HealthReport()
 
-    entities = store.entities()
+    # SUPERSEDED entities are retired on purpose (merged away, or withdrawn).
+    # Counting them as "isolated" would make every correct merge inflate the
+    # headline metric forever -- the number would drift upward as the graph got
+    # BETTER curated, which is exactly backwards. They stay in the store (nothing
+    # is ever deleted); they are simply not part of the integration measurement.
+    entities = [row for row in store.entities()
+                if row["status"] != EntityStatus.SUPERSEDED.value]
     health.total_entities = len(entities)
     health.entities_by_type = dict(
         Counter(row["entity_type"] for row in entities).most_common())

@@ -72,6 +72,9 @@ class IngestReport:
     def as_dict(self) -> dict[str, Any]:
         data = dataclasses.asdict(self)
         data["refusals"] = len(self.refusals)
+        # Keep a bounded sample of the actual reasons in the event ledger, so
+        # `lessons.mine_repeated_refusals` can notice the same one recurring.
+        data["refusal_samples"] = self.refusals[:20]
         return data
 
 

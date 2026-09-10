@@ -180,8 +180,41 @@ def mine_unplaced_properties(store: GraphStore) -> list[dict]:
     }]
 
 
+def mine_repeated_refusals(store: GraphStore) -> list[dict]:
+    """The engine learning from its own failed runs.
+
+    Every ingest event records its refusals. A refusal that recurs across
+    runs is not noise -- it is a record the pipeline cannot handle and keeps
+    tripping on. Surfacing that as a lesson is cheaper than a human noticing
+    the same line in the log for the fifth night running.
+    """
+    seen: dict[str, list[str]] = defaultdict(list)
+    for event in store.events("graph_ingest"):
+        prov = json.loads(event["provenance"] or "{}")
+        for refusal in prov.get("refusal_samples", []):
+            # Strip the volatile record ref; keep the reason, which is what repeats.
+            reason = refusal.split(": ", 1)[-1][:120]
+            seen[reason].append(event["event_id"])
+    findings = []
+    for reason, events in seen.items():
+        if len(set(events)) < MIN_SUPPORT:
+            continue
+        findings.append({
+            "observation": (f"The same ingest refusal recurred across "
+                            f"{len(set(events))} nightly runs: '{reason}'."),
+            "pattern": f"repeated_refusal::{reason[:60]}",
+            "proposed_rule": ("Either fix the source record or teach the adapter "
+                              "to handle this shape; it will not resolve itself."),
+            "expected_impact": "One fewer permanent gap in the graph.",
+            "supporting_events": sorted(set(events)),
+            "confidence": _confidence(len(set(events))),
+        })
+    return findings
+
+
 MINERS = (mine_jurisdiction_corrections, mine_owner_overrides,
-          mine_weak_extraction_methods, mine_unplaced_properties)
+          mine_weak_extraction_methods, mine_unplaced_properties,
+          mine_repeated_refusals)
 
 
 def generate(store: GraphStore, actor: str = "graph-engine") -> LessonReport:
