@@ -112,6 +112,13 @@ def cmd_health(args) -> int:
     return 0
 
 
+def cmd_coverage(args) -> int:
+    store = _store(args)
+    print(health_module.coverage(store))
+    store.close()
+    return 0
+
+
 def cmd_show(args) -> int:
     store = _store(args)
     try:
@@ -203,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
     healthp = subparsers.add_parser("health")
     healthp.add_argument("--vault", default=None)
     healthp.set_defaults(func=cmd_health)
+
+    subparsers.add_parser("coverage").set_defaults(func=cmd_coverage)
 
     show = subparsers.add_parser("show")
     show.add_argument("entity_id")

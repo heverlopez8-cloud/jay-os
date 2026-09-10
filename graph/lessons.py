@@ -23,8 +23,9 @@ import re
 from collections import Counter, defaultdict
 
 from ._reuse import gates
-from .contract import Disposition, EntityType as E, LessonStatus, RelationType as R
-from .store import GraphStore
+from .contract import (Disposition, EntityType as E, LessonStatus,
+                       RelationType as R, VocabularyError)
+from .store import GraphStore, StoreError
 
 #: Two observations minimum. One is an anecdote.
 MIN_SUPPORT = 2
@@ -217,6 +218,52 @@ MINERS = (mine_jurisdiction_corrections, mine_owner_overrides,
           mine_repeated_refusals)
 
 
+def _attach_to_graph(store: GraphStore, lesson_id: str, finding: dict,
+                     actor: str) -> None:
+    """Put the lesson IN the graph, linked to the evidence that produced it.
+
+    Without this a lesson lives only in the `lessons` table -- discoverable
+    by the brief, but invisible to the graph it was learned from. You could
+    not ask "what did we learn from this jurisdiction?" because the lesson
+    and the jurisdiction were in different worlds. `LEARNED_FROM` is in the
+    frozen vocabulary precisely for this and was, until now, unreachable.
+
+    Only entities that already exist are linked. Supporting evidence is a
+    mix of entity ids, event ids and bare strings depending on the miner, so
+    anything that does not resolve to a real node is skipped rather than
+    conjured -- the same no-phantom-endpoints rule `relate()` enforces.
+    """
+    # Key on the bare sequence so entity_id() yields LESSON-00001 rather than
+    # LESSON-LESSON-00001 -- the graph entity id and the lesson_id are then
+    # the same string, which is what makes them joinable without a lookup.
+    sequence = lesson_id.split("-", 1)[1] if "-" in lesson_id else lesson_id
+    lesson_entity = store.upsert_entity(
+        E.LESSON, finding["observation"][:80], key=sequence,
+        source="lesson_engine", source_ref=f"lesson:{lesson_id}",
+        confidence=float(finding["confidence"]),
+        attributes={"lesson_id": lesson_id,
+                    "pattern": finding["pattern"],
+                    "proposed_rule": finding["proposed_rule"],
+                    "status": LessonStatus.CANDIDATE.value})
+
+    for reference in finding.get("supporting_events", ()):
+        target = store.entity(reference)
+        if target is None:
+            continue  # an event id or a bare method name, not a node
+        try:
+            store.relate(
+                lesson_entity, R.LEARNED_FROM, reference,
+                source_reference=f"lesson:{lesson_id}",
+                confidence=float(finding["confidence"]),
+                extraction_method="inferred:lesson_engine_supporting_evidence",
+                provenance={"lesson_id": lesson_id, "actor": actor})
+        except (VocabularyError, StoreError):
+            # LEARNED_FROM accepts OUTCOME/DECISION/REVIEW_COMMENT/EMAIL only.
+            # A lesson supported by a PERMIT is real evidence but not a legal
+            # edge; the lesson still stands on its own record.
+            continue
+
+
 def generate(store: GraphStore, actor: str = "graph-engine") -> LessonReport:
     """Run every miner. Produces CANDIDATE lessons and nothing stronger."""
     report = LessonReport()
@@ -231,6 +278,7 @@ def generate(store: GraphStore, actor: str = "graph-engine") -> LessonReport:
                 confidence=finding["confidence"],
                 supporting_events=finding.get("supporting_events", ()),
                 status=LessonStatus.CANDIDATE)
+            _attach_to_graph(store, lesson_id, finding, actor)
             report.lesson_ids.append(lesson_id)
             if lesson_id in before:
                 report.updated += 1

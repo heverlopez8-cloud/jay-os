@@ -1162,6 +1162,138 @@ class TestRefusalLearning(unittest.TestCase):
         self.assertEqual(lessons_module.mine_repeated_refusals(store), [])
 
 
+class TestLessonsEnterTheGraph(unittest.TestCase):
+    """The self-learning loop: a lesson must link to its own evidence."""
+
+    def _lesson_with_evidence(self, store):
+        rc = store.upsert_entity(E.REVIEW_COMMENT, "deficiency", key="RC-1",
+                                 source="t", source_ref="r1")
+        out = store.upsert_entity(E.OUTCOME, "delivered", key="OUT-1",
+                                  source="t", source_ref="r1")
+        finding = {"observation": "o", "pattern": "p", "proposed_rule": "r",
+                   "confidence": 0.8, "supporting_events": [rc, out]}
+        lesson_id = store.propose_lesson(
+            observation="o", pattern="p", proposed_rule="r", confidence=0.8,
+            supporting_events=[rc, out])
+        lessons_module._attach_to_graph(store, lesson_id, finding, actor="t")
+        return lesson_id, rc, out
+
+    def test_lesson_becomes_a_graph_entity(self):
+        store = _store()
+        lesson_id, _rc, _out = self._lesson_with_evidence(store)
+        self.assertEqual(len(store.entities(E.LESSON)), 1)
+        self.assertIsNotNone(store.entity(lesson_id))
+
+    def test_entity_id_equals_lesson_id_so_they_join(self):
+        store = _store()
+        lesson_id, _rc, _out = self._lesson_with_evidence(store)
+        self.assertEqual(store.entities(E.LESSON)[0]["entity_id"], lesson_id,
+                         "a doubled LESSON-LESSON- prefix breaks the join")
+
+    def test_learned_from_edges_point_at_the_evidence(self):
+        store = _store()
+        lesson_id, rc, out = self._lesson_with_evidence(store)
+        targets = {e["target_entity"] for e in store.relationships_from(lesson_id)
+                   if e["relationship_type"] == R.LEARNED_FROM.value}
+        self.assertEqual(targets, {rc, out})
+
+    def test_illegal_evidence_type_is_skipped_not_forced(self):
+        """LEARNED_FROM does not accept a COMPANY. The lesson still stands.
+
+        (PERMIT was the example here until 2026-09-10, when the domain was
+        widened to cover what the live miners actually cite. COMPANY remains
+        outside it: a lesson is not learned "from" a company.)
+        """
+        store = _store()
+        company = _entity(store, E.COMPANY, "Some Contractor LLC")
+        finding = {"observation": "o", "pattern": "p2", "proposed_rule": "r",
+                   "confidence": 0.8, "supporting_events": [company]}
+        lesson_id = store.propose_lesson(observation="o", pattern="p2",
+                                         proposed_rule="r", confidence=0.8,
+                                         supporting_events=[company])
+        lessons_module._attach_to_graph(store, lesson_id, finding, actor="t")
+        self.assertIsNotNone(store.entity(lesson_id),
+                             "the lesson must survive an unlinkable evidence type")
+        self.assertEqual(store.relationships_from(lesson_id), [])
+
+    def test_permit_evidence_now_links(self):
+        """The widening this session made: miners cite permits, so it must fire."""
+        store = _store()
+        permit = _entity(store, E.PERMIT, "B26-2089")
+        finding = {"observation": "o", "pattern": "p4", "proposed_rule": "r",
+                   "confidence": 0.8, "supporting_events": [permit]}
+        lesson_id = store.propose_lesson(observation="o", pattern="p4",
+                                         proposed_rule="r", confidence=0.8,
+                                         supporting_events=[permit])
+        lessons_module._attach_to_graph(store, lesson_id, finding, actor="t")
+        edges = store.relationships_from(lesson_id)
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0]["relationship_type"], R.LEARNED_FROM.value)
+
+    def test_nonexistent_evidence_is_not_conjured(self):
+        store = _store()
+        finding = {"observation": "o", "pattern": "p3", "proposed_rule": "r",
+                   "confidence": 0.8, "supporting_events": ["EVT-20260101-00001"]}
+        lesson_id = store.propose_lesson(observation="o", pattern="p3",
+                                         proposed_rule="r", confidence=0.8,
+                                         supporting_events=["EVT-20260101-00001"])
+        lessons_module._attach_to_graph(store, lesson_id, finding, actor="t")
+        self.assertEqual(store.relationships_from(lesson_id), [])
+        self.assertIsNone(store.entity("EVT-20260101-00001"))
+
+    def test_attaching_to_the_graph_never_promotes_the_lesson(self):
+        store = _store()
+        lesson_id, _rc, _out = self._lesson_with_evidence(store)
+        self.assertEqual(store.lessons()[0]["status"], LessonStatus.CANDIDATE.value)
+        self.assertEqual(len(store.lessons(LessonStatus.ACTIVE)), 0)
+
+    def test_regenerating_lessons_is_still_idempotent(self):
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=30))
+        lessons_module.generate(store)
+        counts = (store.count("entities"), store.count("relationships"),
+                  store.count("lessons"))
+        lessons_module.generate(store)
+        self.assertEqual(counts, (store.count("entities"),
+                                  store.count("relationships"),
+                                  store.count("lessons")))
+
+
+class TestVocabularyCoverage(unittest.TestCase):
+    """The unreachable half of a frozen vocabulary must be measured."""
+
+    def test_coverage_classifies_live_reachable_blocked(self):
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=10))
+        text = health_module.coverage(store)
+        for heading in ("ENTITY TYPES", "RELATION TYPES", "live", "reachable",
+                        "blocked"):
+            self.assertIn(heading, text)
+
+    def test_live_types_are_reported_live(self):
+        store = _store()
+        GraphPipeline(store).ingest(ProjectsJson(limit=10))
+        text = health_module.coverage(store)
+        live_line = [l for l in text.splitlines() if "live      :" in l][0]
+        self.assertIn("PROJECT", live_line)
+
+    def test_blocked_members_carry_a_stated_reason(self):
+        from graph.health import NEEDS_A_CONNECTOR
+        self.assertIn("INVOICE", NEEDS_A_CONNECTOR)
+        self.assertIn("PAID_BY", NEEDS_A_CONNECTOR)
+        for name, reason in NEEDS_A_CONNECTOR.items():
+            self.assertTrue(reason.strip(), f"{name} is blocked with no reason given")
+
+    def test_reachability_is_read_from_source_not_hardcoded(self):
+        """A handler naming a type must classify it reachable, not blocked."""
+        store = _store()
+        text = health_module.coverage(store)
+        # REVIEW_COMMENT has a handler (_handle_review_comment) so it must not
+        # be listed as blocked even though nothing has produced one here.
+        blocked_lines = [l for l in text.splitlines() if "blocked   :" in l]
+        self.assertFalse(any("REVIEW_COMMENT" in l for l in blocked_lines))
+
+
 class TestPilot(unittest.TestCase):
     """The Phase 12 pilot is itself a regression test."""
 

@@ -132,6 +132,84 @@ def report(store: GraphStore, vault_root: str | Path | None = None) -> HealthRep
     return health
 
 
+#: Vocabulary that exists in `contract.py` but that no adapter can currently
+#: produce, with the reason. Declared here so the gap is MEASURED rather than
+#: silently dead -- a frozen vocabulary whose unreachable half nobody tracks
+#: slowly becomes fiction.
+NEEDS_A_CONNECTOR = {
+    "PAID_BY": "no billing source",
+    "PAID_TO": "no billing source",
+    "MENTIONED_IN": "needs an EMAIL/MEETING entity source to be mentioned in",
+    "SUPERSEDES": "no revision-tracking source",
+    "DEPENDS_ON": "no task/permit dependency source",
+    "GENERATED": "needs an AGENT/WORKFLOW source",
+    "RELATED_TO": "deliberately unused; too weak to emit without a use case",
+    "CALL": "no telephony source (Quo connector not built)",
+    "EMAIL": "sentinel ledger supplies emails as evidence, not as entities",
+    "CONTRACT": "no contract source (PandaDoc connector not built)",
+    "INVOICE": "no billing source",
+    "PAYMENT": "no billing source",
+    "AGENT": "no agent-activity source",
+    "WORKFLOW": "no n8n/orchestrator connector",
+}
+
+
+def coverage(store: GraphStore) -> str:
+    """Which of the frozen vocabulary is reachable, and which is not.
+
+    Three states, and the difference between the last two matters:
+      live       -- present in the graph right now
+      reachable  -- a handler exists; empty only because no source feeds it
+      blocked    -- no code path at all; needs a connector before it can exist
+    """
+    from .contract import EntityType, RelationType
+
+    entity_live = {row["entity_type"] for row in store.entities()}
+    rel_live = {row["relationship_type"] for row in store.all_relationships()}
+
+    # "Reachable" is not a guess. A member is reachable only if some handler
+    # actually names it -- read off the source, so this report cannot drift
+    # away from the code the way a hand-maintained list would.
+    handler_source = ""
+    for module in ("pipeline.py", "lessons.py", "resolve.py"):
+        try:
+            handler_source += (Path(__file__).resolve().parent / module).read_text()
+        except OSError:
+            pass
+
+    def _emitted(member, alias: str) -> bool:
+        return (f"{alias}.{member.name}" in handler_source
+                or f"{type(member).__name__}.{member.name}" in handler_source)
+
+    lines = ["VOCABULARY COVERAGE", "=" * 62]
+    for label, members, live, alias in (
+            ("ENTITY TYPES", list(EntityType), entity_live, "E"),
+            ("RELATION TYPES", list(RelationType), rel_live, "R")):
+        blocked = [m.value for m in members
+                   if m.value not in live and not _emitted(m, alias)]
+        reachable = [m.value for m in members
+                     if m.value not in live and _emitted(m, alias)]
+        present = sorted(m.value for m in members if m.value in live)
+        lines += [
+            "",
+            f"  {label}  ({len(present)}/{len(members)} live)",
+            "  " + "-" * 60,
+            f"    live      : {', '.join(present) or 'none'}",
+            f"    reachable : {', '.join(sorted(reachable)) or 'none'}",
+        ]
+        if blocked:
+            lines.append(f"    blocked   : {', '.join(sorted(blocked))}")
+            for name in sorted(blocked):
+                reason = NEEDS_A_CONNECTOR.get(name)
+                if reason:
+                    lines.append(f"                {name} — {reason}")
+    lines += ["",
+              "  live      = present in the graph now",
+              "  reachable = a handler emits it; empty only for want of data",
+              "  blocked   = no code path emits it; needs a connector first"]
+    return "\n".join(lines)
+
+
 def render(health: HealthReport) -> str:
     """Human-readable health, headline metric first."""
     lines = [

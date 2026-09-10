@@ -224,7 +224,15 @@ RELATION_DOMAINS: dict[RelationType, frozenset[tuple[EntityType, EntityType]]] =
         (E.PERMIT, E.PERMIT)}),
     R.LEARNED_FROM: frozenset({
         (E.LESSON, E.OUTCOME), (E.LESSON, E.DECISION),
-        (E.LESSON, E.REVIEW_COMMENT), (E.LESSON, E.EMAIL)}),
+        (E.LESSON, E.REVIEW_COMMENT), (E.LESSON, E.EMAIL),
+        # Widened 2026-09-10 after the first run against real data: every
+        # live miner cites PROPERTYs, PERMITs or a JURISDICTION as its
+        # evidence ("99 properties have no jurisdiction"), so the original
+        # domain made LEARNED_FROM decorative -- wired, but unable to fire
+        # for anything the engine actually discovers. A lesson learned from
+        # a set of permits is a lesson learned from those permits.
+        (E.LESSON, E.PROPERTY), (E.LESSON, E.PERMIT),
+        (E.LESSON, E.JURISDICTION), (E.LESSON, E.PROJECT)}),
 }
 
 
