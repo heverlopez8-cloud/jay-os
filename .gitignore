@@ -1,0 +1,60 @@
+# JAY-OS monorepo .gitignore
+# Written BEFORE the first commit, deliberately -- see the repo's own
+# history (or lack of it) for why that order matters: once a credential is
+# committed, deleting it in a later commit does not remove it from history.
+
+# --- Never committed, ever ---
+secrets/
+*.env
+.env.*
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+*_token.json
+google_token.json
+google_client_secret.json
+*credential*.json
+
+# --- email-sentinel keeps its OWN separate git repo and remote ---
+# (apps/email-sentinel/.git, pushed to JAY-OS-Email-Sentinel on GitHub).
+# This monorepo does not absorb it: doing so would either destroy that
+# repo's local history or create a broken nested-repo reference. Its files
+# are gitignored here so `git add .` never tries to touch them.
+apps/email-sentinel/
+
+# --- Derived/regenerable data, not source ---
+# The graph database and logs are rebuilt by `python -m graph ingest`; they
+# are a local cache of Notion + the sentinel ledger, not something to diff
+# or review in pull requests.
+graph/jayos-graph.sqlite3
+graph/jayos-graph.sqlite3-*
+graph/pages/
+graph/logs/
+graph/vault-sample/
+/tmp/
+
+# --- Generated permit PDFs (large binaries, one per permit, rebuilt from
+# the .py build script sitting right next to them) ---
+permits/*/*.pdf
+
+# --- Demo/acceptance-test OUTPUT, not source. live_acceptance.py and
+# live_canary.py (the scripts) are tracked; what running them produced is
+# not. notion_outbox.json in particular carries a real Notion page id and a
+# real teammate's Notion user id alongside its synthetic ZZ-TEST content --
+# regenerable, and not something that belongs in git history either way. ---
+orchestrator/permit_pipeline/demo/*.db
+orchestrator/permit_pipeline/demo/notion_outbox.json
+
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Editor/OS noise ---
+.DS_Store
+*.swp
+
+# --- Backup files left by earlier hand-edits ---
+*.bak
+*.bak-*
