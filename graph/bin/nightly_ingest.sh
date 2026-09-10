@@ -63,6 +63,13 @@ run_step "health report"                          health
 # tonight's row has to exist before it can be compared against last night's.
 run_step "snapshot"                               snapshot --label nightly
 
+# Regenerate the derived artifacts. These were previously produced once by
+# hand and then silently went stale as the graph moved on -- entity pages
+# hours older than the database they describe are worse than no pages, since
+# a reader cannot tell. Regenerating nightly is what keeps that from recurring.
+run_step "canonical entity pages"                 pages
+run_step "graphify-compatible export"             graphify-export
+
 # The morning brief, written to its own file so it can be read on its own
 # rather than hunted for inside the run log.
 BRIEF_FILE="$LOG_DIR/morning-brief.txt"
